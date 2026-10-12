@@ -477,9 +477,19 @@ export const backupQuestionsToSupabase = async (
 
       if (error) {
         console.error('Supabase backup error (bank_soal):', error);
+        const msg = (error.message || '').toLowerCase();
+        const code = (error as any).code;
+
+        let friendlyMsg = `Gagal mencadangkan soal ke Supabase: ${error.message}`;
+        if (code === '42P01' || msg.includes('does not exist')) {
+          friendlyMsg = 'Tabel "bank_soal" belum dibuat di database Supabase! Buka tab "Skema SQL Editor" dan jalankan skrip di SQL Editor Supabase.';
+        } else if (code === '42501' || msg.includes('permission denied') || msg.includes('row-level security') || msg.includes('policy')) {
+          friendlyMsg = 'Akses ditolak oleh Row Level Security (RLS) Supabase! Jalankan kebijakan keamanan di tab "Skema SQL Editor".';
+        }
+
         return {
           success: false,
-          message: `Gagal mencadangkan soal ke Supabase: ${error.message}`,
+          message: friendlyMsg,
           error: error.message,
         };
       }
@@ -498,6 +508,139 @@ export const backupQuestionsToSupabase = async (
   }
 };
 
+export interface SupabaseDiagnosticResult {
+  isConfigured: boolean;
+  canConnect: boolean;
+  tableExists: boolean;
+  rlsOk: boolean;
+  totalQuestions: number;
+  teachers: string[];
+  subjects: string[];
+  errorMessage?: string;
+  solution?: string;
+}
+
+/**
+ * Perform a full diagnostic check on the Supabase Bank Soal database setup
+ */
+export const diagnoseSupabaseBankSoal = async (): Promise<SupabaseDiagnosticResult> => {
+  if (!isSupabaseConfigured()) {
+    return {
+      isConfigured: false,
+      canConnect: false,
+      tableExists: false,
+      rlsOk: false,
+      totalQuestions: 0,
+      teachers: [],
+      subjects: [],
+      errorMessage: 'URL atau Anon Public Key Supabase belum diisi atau tidak valid di browser ini.',
+      solution: 'Buka tab "Kredensial API", lalu masukkan URL Project Supabase dan Anon Key Anda.',
+    };
+  }
+
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      isConfigured: true,
+      canConnect: false,
+      tableExists: false,
+      rlsOk: false,
+      totalQuestions: 0,
+      teachers: [],
+      subjects: [],
+      errorMessage: 'Klien Supabase gagal diinisialisasi.',
+      solution: 'Periksa format URL Supabase (harus diawali https://) dan pastikan Anon Key lengkap.',
+    };
+  }
+
+  try {
+    // Check if table 'bank_soal' exists & is queryable
+    const { data, error, count } = await client
+      .from('bank_soal')
+      .select('id, kode_guru, mapel', { count: 'exact' })
+      .limit(200);
+
+    if (error) {
+      const msg = (error.message || '').toLowerCase();
+      const code = (error as any).code;
+
+      if (code === '42P01' || msg.includes('does not exist') || msg.includes('not exist')) {
+        return {
+          isConfigured: true,
+          canConnect: true,
+          tableExists: false,
+          rlsOk: false,
+          totalQuestions: 0,
+          teachers: [],
+          subjects: [],
+          errorMessage: 'Tabel "bank_soal" belum dibuat di database Supabase Anda.',
+          solution: 'Buka tab "Skema SQL Editor" pada modal ini, salin skrip SQL-nya, lalu tempel & jalankan (Run) di menu "SQL Editor" pada Dashboard Supabase Anda.',
+        };
+      }
+
+      if (code === '42501' || msg.includes('permission denied') || msg.includes('row-level security') || msg.includes('policy')) {
+        return {
+          isConfigured: true,
+          canConnect: true,
+          tableExists: true,
+          rlsOk: false,
+          totalQuestions: 0,
+          teachers: [],
+          subjects: [],
+          errorMessage: 'Akses diblokir oleh Row Level Security (RLS) Supabase.',
+          solution: 'Jalankan skrip pembuatan Policy di tab "Skema SQL Editor" agar Supabase mengizinkan pembacaan & penulisan data oleh Anon Key.',
+        };
+      }
+
+      return {
+        isConfigured: true,
+        canConnect: false,
+        tableExists: false,
+        rlsOk: false,
+        totalQuestions: 0,
+        teachers: [],
+        subjects: [],
+        errorMessage: `Koneksi Supabase error: ${error.message}`,
+        solution: 'Periksa koneksi internet, pastikan project Supabase Anda aktif (tidak Pause), dan Anon Key benar.',
+      };
+    }
+
+    const teacherSet = new Set<string>();
+    const subjectSet = new Set<string>();
+    (data || []).forEach((r: any) => {
+      if (r.kode_guru) teacherSet.add(String(r.kode_guru).trim());
+      if (r.mapel) subjectSet.add(String(r.mapel).trim());
+    });
+
+    const total = count ?? (data?.length || 0);
+
+    return {
+      isConfigured: true,
+      canConnect: true,
+      tableExists: true,
+      rlsOk: true,
+      totalQuestions: total,
+      teachers: Array.from(teacherSet),
+      subjects: Array.from(subjectSet),
+      solution: total === 0
+        ? 'Tabel "bank_soal" sudah aktif, tetapi masih kosong (0 butir). Anda perlu mengunggah soal dari browser terlebih dahulu.'
+        : `Database siap! Tersedia ${total} butir soal di cloud dari ${teacherSet.size} guru dan ${subjectSet.size} mapel.`,
+    };
+  } catch (err: any) {
+    return {
+      isConfigured: true,
+      canConnect: false,
+      tableExists: false,
+      rlsOk: false,
+      totalQuestions: 0,
+      teachers: [],
+      subjects: [],
+      errorMessage: `Gagal menghubungi Supabase: ${err.message || err}`,
+      solution: 'Pastikan URL Supabase valid dan project Supabase Anda sedang aktif di https://supabase.com.',
+    };
+  }
+};
+
 /**
  * Restore / Pull questions from Supabase table 'bank_soal'
  */
@@ -509,28 +652,37 @@ export const restoreQuestionsFromSupabase = async (filter?: {
   message: string;
   data?: Question[];
   count?: number;
+  diagnosticHelp?: string;
 }> => {
   if (!isSupabaseConfigured()) {
     return {
       success: false,
-      message: 'Supabase belum dikonfigurasi.',
+      message: 'Supabase belum dikonfigurasi di browser ini. Harap isi URL & Anon Key di tab Kredensial API.',
+      diagnosticHelp: 'Kredensial disimpan per-browser di Local Storage. Jika membuka di laptop/browser baru, masukkan URL & Key Supabase terlebih dahulu.',
     };
   }
 
   const client = getSupabaseClient();
   if (!client) {
-    return { success: false, message: 'Gagal terhubung ke Supabase Client.' };
+    return {
+      success: false,
+      message: 'Gagal terhubung ke Supabase Client.',
+      diagnosticHelp: 'Periksa kembali URL dan API Key Supabase Anda.',
+    };
   }
 
   try {
     let query = client.from('bank_soal').select('*');
 
-    if (filter?.kodeGuru && filter.kodeGuru !== 'ALL') {
-      query = query.eq('kode_guru', filter.kodeGuru);
+    const guruFilter = filter?.kodeGuru?.trim();
+    if (guruFilter && guruFilter !== 'ALL') {
+      // Case-insensitive ilike matching to avoid uppercase/lowercase mismatch
+      query = query.ilike('kode_guru', guruFilter);
     }
 
-    if (filter?.mapel && filter.mapel !== 'ALL') {
-      query = query.eq('mapel', filter.mapel);
+    const mapelFilter = filter?.mapel?.trim();
+    if (mapelFilter && mapelFilter !== 'ALL') {
+      query = query.ilike('mapel', mapelFilter);
     }
 
     query = query.order('id', { ascending: true });
@@ -538,30 +690,66 @@ export const restoreQuestionsFromSupabase = async (filter?: {
     const { data: dbQuestions, error } = await query;
 
     if (error) {
+      const msg = (error.message || '').toLowerCase();
+      const code = (error as any).code;
+
+      let customMessage = `Gagal memuat soal dari Supabase: ${error.message}`;
+      let help = '';
+
+      if (code === '42P01' || msg.includes('does not exist') || msg.includes('not exist')) {
+        customMessage = 'Tabel "bank_soal" belum dibuat di database Supabase Anda!';
+        help = 'Buka tab "Skema SQL Editor" pada modal ini, salin skripnya, lalu jalankan di menu "SQL Editor" pada Dashboard Supabase Anda.';
+      } else if (code === '42501' || msg.includes('permission denied') || msg.includes('row-level security') || msg.includes('policy')) {
+        customMessage = 'Akses ditolak oleh Row Level Security (RLS) Supabase!';
+        help = 'Jalankan skrip pembuatan Policy di tab "Skema SQL Editor" pada Dashboard Supabase Anda agar Anon Key diizinkan membaca data.';
+      } else if (msg.includes('failed to fetch') || msg.includes('network') || msg.includes('fetch failed')) {
+        customMessage = 'Gagal menghubungi server Supabase (Koneksi / CORS error)!';
+        help = 'Periksa koneksi internet Anda, dan pastikan project Supabase Anda tidak dalam status "Paused" (Ditangguhkan) di dashboard supabase.com.';
+      }
+
       return {
         success: false,
-        message: `Gagal memuat soal dari Supabase: ${error.message}`,
+        message: customMessage,
+        diagnosticHelp: help,
       };
     }
 
     if (!dbQuestions || dbQuestions.length === 0) {
-      return {
-        success: true,
-        message: 'Tidak ada data soal ditemukan di Supabase sesuai filter yang dipilih.',
-        data: [],
-        count: 0,
-      };
+      // Check whether table has ANY questions in general to give precise feedback
+      let totalInCloud = 0;
+      try {
+        const checkTotal = await client.from('bank_soal').select('id', { count: 'exact', head: true });
+        totalInCloud = checkTotal.count || 0;
+      } catch (_) {}
+
+      if (totalInCloud === 0) {
+        return {
+          success: false,
+          message: 'Tabel "bank_soal" di Supabase masih kosong (0 butir soal).',
+          diagnosticHelp: 'Belum ada guru yang mengunggah soal ke Cloud. Silakan gunakan panel "Cadangkan Soal Lokal ke Supabase" untuk mengupload soal terlebih dahulu.',
+          data: [],
+          count: 0,
+        };
+      } else {
+        return {
+          success: false,
+          message: `Tidak ditemukan soal yang cocok dengan filter (${guruFilter ? `Guru: ${guruFilter}` : ''} ${mapelFilter ? `Mapel: ${mapelFilter}` : ''}).`,
+          diagnosticHelp: `Di database Supabase terdapat ${totalInCloud} butir soal lain. Coba ganti "Filter Guru" ke "Semua Guru" dan "Filter Mapel" ke "Semua Mata Pelajaran" untuk menarik seluruh soal!`,
+          data: [],
+          count: 0,
+        };
+      }
     }
 
     const questions: Question[] = dbQuestions.map((row: any) => ({
-      id: Number(row.id),
+      id: Number(row.id) || Date.now(),
       question: row.question,
-      options: row.options || [],
+      options: Array.isArray(row.options) ? row.options : (typeof row.options === 'string' ? JSON.parse(row.options) : []),
       explanation: row.explanation || '',
       explanationImage: row.explanation_image || undefined,
-      explanationImages: row.explanation_images || [],
+      explanationImages: Array.isArray(row.explanation_images) ? row.explanation_images : [],
       image: row.image || undefined,
-      images: row.images || [],
+      images: Array.isArray(row.images) ? row.images : [],
       imagePosition: row.image_position || 'top',
       isActive: row.is_active !== false,
       mapel: row.mapel,
@@ -569,8 +757,8 @@ export const restoreQuestionsFromSupabase = async (filter?: {
       subTopik: row.sub_topik || undefined,
       bentukSoal: row.bentuk_soal || 'Pilihan Ganda',
       kodeGuru: row.kode_guru || undefined,
-      categoryOptions: row.category_options || undefined,
-      categoryStatements: row.category_statements || undefined,
+      categoryOptions: Array.isArray(row.category_options) ? row.category_options : undefined,
+      categoryStatements: Array.isArray(row.category_statements) ? row.category_statements : undefined,
       poin: row.poin || 10,
     }));
 
@@ -584,6 +772,7 @@ export const restoreQuestionsFromSupabase = async (filter?: {
     return {
       success: false,
       message: `Error saat memuat soal dari Supabase: ${err.message || err}`,
+      diagnosticHelp: 'Periksa format data atau koneksi ke Supabase.',
     };
   }
 };

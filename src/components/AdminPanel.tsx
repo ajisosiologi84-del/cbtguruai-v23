@@ -10883,7 +10883,21 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           } else {
             const existingMap = new Map<number, Question>();
             config.questions.forEach((q) => existingMap.set(Number(q.id), q));
-            restoredQuestions.forEach((q) => existingMap.set(Number(q.id), q));
+            restoredQuestions.forEach((q) => {
+              const numId = Number(q.id);
+              if (existingMap.has(numId)) {
+                const existing = existingMap.get(numId);
+                if (existing && existing.question.trim() === q.question.trim()) {
+                  existingMap.set(numId, q);
+                } else {
+                  const maxId = Math.max(0, ...Array.from(existingMap.keys()));
+                  const newId = maxId + 1;
+                  existingMap.set(newId, { ...q, id: newId });
+                }
+              } else {
+                existingMap.set(numId, q);
+              }
+            });
             newQuestions = Array.from(existingMap.values()).sort((a, b) => Number(a.id) - Number(b.id));
           }
           onSaveConfig({ ...config, questions: newQuestions });

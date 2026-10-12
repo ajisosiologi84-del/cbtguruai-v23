@@ -29,6 +29,8 @@ import {
   backupQuestionsToSupabase,
   restoreQuestionsFromSupabase,
   fetchSupabaseQuestionStats,
+  diagnoseSupabaseBankSoal,
+  SupabaseDiagnosticResult,
   RestoredMasterUsers,
 } from '../services/supabaseBackup';
 
@@ -84,12 +86,52 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
   const [questionFilterMapel, setQuestionFilterMapel] = useState<string>('ALL');
   const [restoreMode, setRestoreMode] = useState<'merge' | 'replace'>('merge');
 
-  // Supabase Question Stats
+  // Supabase Question Stats & Diagnostic
   const [cloudStats, setCloudStats] = useState<{
     total: number;
     teachers: string[];
     subjects: string[];
   } | null>(null);
+  const [diagnosticData, setDiagnosticData] = useState<SupabaseDiagnosticResult | null>(null);
+  const [isCheckingDiagnostic, setIsCheckingDiagnostic] = useState<boolean>(false);
+
+  const handleRunDiagnostic = async () => {
+    setIsCheckingDiagnostic(true);
+    setStatusMessage({
+      type: 'info',
+      text: 'Sedang memeriksa koneksi Supabase & tabel bank_soal...',
+    });
+    const diag = await diagnoseSupabaseBankSoal();
+    setDiagnosticData(diag);
+    setIsCheckingDiagnostic(false);
+
+    if (!diag.canConnect) {
+      setStatusMessage({
+        type: 'error',
+        text: `Diagnostik: Gagal terhubung ke Supabase. ${diag.errorMessage || ''}`,
+      });
+    } else if (!diag.tableExists) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Diagnostik: Tabel "bank_soal" belum dibuat di Supabase! Buka tab "Skema SQL Editor".',
+      });
+    } else if (!diag.rlsOk) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Diagnostik: Row Level Security (RLS) memblokir pembacaan data. Jalankan skrip Policy.',
+      });
+    } else {
+      setCloudStats({
+        total: diag.totalQuestions,
+        teachers: diag.teachers,
+        subjects: diag.subjects,
+      });
+      setStatusMessage({
+        type: 'success',
+        text: `Diagnostik Sukses! Tabel bank_soal siap. Tersedia ${diag.totalQuestions} butir soal di cloud.`,
+      });
+    }
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -122,18 +164,9 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
     localStorage.setItem('cbt_supabase_key', supabaseAnonKey.trim());
     setStatusMessage({
       type: 'success',
-      text: 'Kredensial Supabase berhasil disimpan di penyimpanan browser lokal!',
+      text: 'Kredensial Supabase berhasil disimpan di browser lokal!',
     });
-    // refresh stats
-    fetchSupabaseQuestionStats().then((res) => {
-      if (res.success) {
-        setCloudStats({
-          total: res.total,
-          teachers: res.teachers,
-          subjects: res.subjects,
-        });
-      }
-    });
+    handleRunDiagnostic();
   };
 
   // --- QUESTION SYNC HANDLERS ---
@@ -154,7 +187,6 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
     setIsLoading(false);
     if (result.success) {
       setStatusMessage({ type: 'success', text: result.message });
-      // Update stats
       fetchSupabaseQuestionStats().then((res) => {
         if (res.success) {
           setCloudStats({
@@ -167,6 +199,9 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
       showAlert(result.message);
     } else {
       setStatusMessage({ type: 'error', text: result.message });
+      // Run diagnostic in background to identify missing table or RLS issue
+      diagnoseSupabaseBankSoal().then((diag) => setDiagnosticData(diag));
+      showAlert(result.message);
     }
   };
 
@@ -175,13 +210,6 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
       showAlert('Fungsi restore soal belum terpasang.');
       return;
     }
-
-    const confirmMsg =
-      restoreMode === 'replace'
-        ? 'PERINGATAN: Mode "Gantikan" akan menimpa seluruh soal di browser ini dengan soal dari Supabase. Lanjutkan?'
-        : 'Mode "Gabungkan" akan menambahkan soal dari Supabase ke bank soal browser ini tanpa menghapus soal yang sudah ada. Lanjutkan?';
-
-    if (!confirm(confirmMsg)) return;
 
     setIsLoading(true);
     setStatusMessage({
@@ -195,16 +223,7 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
     });
 
     setIsLoading(false);
-    if (result.success && result.data) {
-      if (result.data.length === 0) {
-        setStatusMessage({
-          type: 'info',
-          text: 'Tidak ada soal ditemukan di Supabase sesuai filter yang dipilih.',
-        });
-        showAlert('Tidak ada butir soal ditemukan di Supabase sesuai filter.');
-        return;
-      }
-
+    if (result.success && result.data && result.data.length > 0) {
       onRestoreQuestions(result.data, restoreMode);
       setStatusMessage({
         type: 'success',
@@ -216,7 +235,16 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
         `Sukses! ${result.data.length} butir soal dari Supabase berhasil disinkronkan ke browser Anda.`
       );
     } else {
-      setStatusMessage({ type: 'error', text: result.message });
+      const fullError =
+        result.message +
+        (result.diagnosticHelp ? `\n\n💡 Solusi / Petunjuk: ${result.diagnosticHelp}` : '');
+      setStatusMessage({
+        type: 'error',
+        text: `${result.message} ${result.diagnosticHelp ? `[${result.diagnosticHelp}]` : ''}`,
+      });
+      // Automatically run diagnostic so UI displays the exact status and fix
+      diagnoseSupabaseBankSoal().then((diag) => setDiagnosticData(diag));
+      showAlert(fullError);
     }
   };
 
@@ -556,8 +584,95 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                     )}
                     <span>Tarik Soal dari Supabase ke Browser</span>
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={handleRunDiagnostic}
+                    disabled={isCheckingDiagnostic || !isConfigured}
+                    className="w-full bg-white hover:bg-slate-50 text-slate-700 font-bold py-2 px-3 rounded-xl text-[11px] border border-slate-300 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-2xs"
+                  >
+                    {isCheckingDiagnostic ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                    ) : (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
+                    )}
+                    <span>{isCheckingDiagnostic ? 'Sedang Mendiagnosa...' : '🔍 Cek Status Database & Diagnostik Soal'}</span>
+                  </button>
                 </div>
               </div>
+
+              {/* DIAGNOSTIC REPORT CARD */}
+              {diagnosticData && (
+                <div
+                  className={`p-4 rounded-2xl border text-xs space-y-2 ${
+                    !diagnosticData.canConnect || !diagnosticData.tableExists || !diagnosticData.rlsOk
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-emerald-50/90 border-emerald-300 text-emerald-950'
+                  }`}
+                >
+                  <div className="flex items-center justify-between pb-1 border-b border-black/10">
+                    <span className="font-extrabold flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4" />
+                      Hasil Diagnostik Database Supabase Cloud:
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                        diagnosticData.tableExists && diagnosticData.rlsOk
+                          ? 'bg-emerald-200 text-emerald-800'
+                          : 'bg-amber-200 text-amber-800'
+                      }`}
+                    >
+                      {diagnosticData.tableExists && diagnosticData.rlsOk ? 'Siap Digunakan' : 'Perlu Tindakan'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 py-1 text-[11px]">
+                    <div className="bg-white/80 p-2 rounded-xl border border-black/5">
+                      <span className="text-slate-500 block">Koneksi API:</span>
+                      <strong className={diagnosticData.canConnect ? 'text-emerald-700' : 'text-red-700'}>
+                        {diagnosticData.canConnect ? '✅ Terhubung' : '❌ Gagal Terhubung'}
+                      </strong>
+                    </div>
+
+                    <div className="bg-white/80 p-2 rounded-xl border border-black/5">
+                      <span className="text-slate-500 block">Tabel bank_soal:</span>
+                      <strong className={diagnosticData.tableExists ? 'text-emerald-700' : 'text-red-700 font-extrabold'}>
+                        {diagnosticData.tableExists ? '✅ Ada di Database' : '❌ Belum Dibuat'}
+                      </strong>
+                    </div>
+
+                    <div className="bg-white/80 p-2 rounded-xl border border-black/5">
+                      <span className="text-slate-500 block">Soal di Cloud:</span>
+                      <strong className="text-slate-900">
+                        {diagnosticData.totalQuestions} Butir Soal
+                      </strong>
+                    </div>
+                  </div>
+
+                  {diagnosticData.errorMessage && (
+                    <div className="p-2 bg-red-100/90 text-red-900 rounded-xl font-medium text-[11px]">
+                      ⚠️ <b>Kendala:</b> {diagnosticData.errorMessage}
+                    </div>
+                  )}
+
+                  {diagnosticData.solution && (
+                    <div className="p-2.5 bg-white/90 text-slate-800 rounded-xl font-medium text-[11px] flex items-start justify-between gap-2 border border-black/5">
+                      <div>
+                        💡 <b>Solusi:</b> {diagnosticData.solution}
+                      </div>
+                      {!diagnosticData.tableExists && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('sql')}
+                          className="shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Buka Tab SQL ➔
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
