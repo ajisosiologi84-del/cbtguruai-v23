@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Database,
@@ -13,15 +13,23 @@ import {
   Users,
   GraduationCap,
   Shield,
-  FileCode
+  FileCode,
+  BookOpen,
+  CheckCircle2,
+  AlertTriangle,
+  Layers,
+  Sparkles,
 } from 'lucide-react';
-import { StudentUser, TeacherUser, AdminUser } from '../types';
+import { StudentUser, TeacherUser, AdminUser, Question } from '../types';
 import { isSupabaseConfigured } from '../lib/supabase';
 import {
   backupAllUsersToSupabase,
   restoreUsersFromSupabase,
   generateSupabaseSQLSchema,
-  RestoredMasterUsers
+  backupQuestionsToSupabase,
+  restoreQuestionsFromSupabase,
+  fetchSupabaseQuestionStats,
+  RestoredMasterUsers,
 } from '../services/supabaseBackup';
 
 export interface SupabaseBackupModalProps {
@@ -30,7 +38,13 @@ export interface SupabaseBackupModalProps {
   students: StudentUser[];
   teachers: TeacherUser[];
   admins: AdminUser[];
+  questions?: Question[];
+  defaultKodeGuru?: string;
+  defaultMapel?: string;
+  mapelList?: string[];
+  initialTab?: 'questions' | 'sync' | 'config' | 'sql';
   onRestoreUsers: (data: RestoredMasterUsers) => void;
+  onRestoreQuestions?: (questions: Question[], mode: 'merge' | 'replace') => void;
   showAlert?: (msg: string) => void;
 }
 
@@ -40,8 +54,14 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
   students,
   teachers,
   admins,
+  questions = [],
+  defaultKodeGuru = 'GURU01',
+  defaultMapel = 'Sosiologi',
+  mapelList = [],
+  initialTab = 'questions',
   onRestoreUsers,
-  showAlert = alert
+  onRestoreQuestions,
+  showAlert = alert,
 }) => {
   const metaEnv = (import.meta as any)?.env || {};
   const [supabaseUrl, setSupabaseUrl] = useState<string>(
@@ -51,10 +71,42 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
     localStorage.getItem('cbt_supabase_key') || metaEnv.VITE_SUPABASE_ANON_KEY || ''
   );
 
-  const [activeTab, setActiveTab] = useState<'sync' | 'config' | 'sql'>('sync');
+  const [activeTab, setActiveTab] = useState<'questions' | 'sync' | 'config' | 'sql'>(initialTab);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [statusMessage, setStatusMessage] = useState<{
+    type: 'success' | 'error' | 'info';
+    text: string;
+  } | null>(null);
+
+  // Question Sync Filters
+  const [questionFilterGuru, setQuestionFilterGuru] = useState<string>('ALL');
+  const [questionFilterMapel, setQuestionFilterMapel] = useState<string>('ALL');
+  const [restoreMode, setRestoreMode] = useState<'merge' | 'replace'>('merge');
+
+  // Supabase Question Stats
+  const [cloudStats, setCloudStats] = useState<{
+    total: number;
+    teachers: string[];
+    subjects: string[];
+  } | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+      if (isSupabaseConfigured()) {
+        fetchSupabaseQuestionStats().then((res) => {
+          if (res.success) {
+            setCloudStats({
+              total: res.total,
+              teachers: res.teachers,
+              subjects: res.subjects,
+            });
+          }
+        });
+      }
+    }
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 
@@ -72,15 +124,109 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
       type: 'success',
       text: 'Kredensial Supabase berhasil disimpan di penyimpanan browser lokal!',
     });
+    // refresh stats
+    fetchSupabaseQuestionStats().then((res) => {
+      if (res.success) {
+        setCloudStats({
+          total: res.total,
+          teachers: res.teachers,
+          subjects: res.subjects,
+        });
+      }
+    });
   };
 
-  const handleBackupNow = async () => {
-    setIsLoading(true);
-    setStatusMessage({ type: 'info', text: 'Sedang mencadangkan data master user ke Supabase Cloud...' });
+  // --- QUESTION SYNC HANDLERS ---
+  const handleBackupQuestionsNow = async () => {
+    if (!questions || questions.length === 0) {
+      setStatusMessage({ type: 'error', text: 'Tidak ada soal di browser untuk dicadangkan.' });
+      return;
+    }
 
-    // Save active config to localStorage in case
-    localStorage.setItem('cbt_supabase_url', supabaseUrl.trim());
-    localStorage.setItem('cbt_supabase_key', supabaseAnonKey.trim());
+    setIsLoading(true);
+    setStatusMessage({
+      type: 'info',
+      text: `Sedang mencadangkan ${questions.length} butir soal ke Supabase Cloud (Tabel bank_soal)...`,
+    });
+
+    const result = await backupQuestionsToSupabase(questions, defaultKodeGuru, defaultMapel);
+
+    setIsLoading(false);
+    if (result.success) {
+      setStatusMessage({ type: 'success', text: result.message });
+      // Update stats
+      fetchSupabaseQuestionStats().then((res) => {
+        if (res.success) {
+          setCloudStats({
+            total: res.total,
+            teachers: res.teachers,
+            subjects: res.subjects,
+          });
+        }
+      });
+      showAlert(result.message);
+    } else {
+      setStatusMessage({ type: 'error', text: result.message });
+    }
+  };
+
+  const handleRestoreQuestionsNow = async () => {
+    if (!onRestoreQuestions) {
+      showAlert('Fungsi restore soal belum terpasang.');
+      return;
+    }
+
+    const confirmMsg =
+      restoreMode === 'replace'
+        ? 'PERINGATAN: Mode "Gantikan" akan menimpa seluruh soal di browser ini dengan soal dari Supabase. Lanjutkan?'
+        : 'Mode "Gabungkan" akan menambahkan soal dari Supabase ke bank soal browser ini tanpa menghapus soal yang sudah ada. Lanjutkan?';
+
+    if (!confirm(confirmMsg)) return;
+
+    setIsLoading(true);
+    setStatusMessage({
+      type: 'info',
+      text: 'Sedang mengunduh butir soal dari Supabase Cloud...',
+    });
+
+    const result = await restoreQuestionsFromSupabase({
+      kodeGuru: questionFilterGuru,
+      mapel: questionFilterMapel,
+    });
+
+    setIsLoading(false);
+    if (result.success && result.data) {
+      if (result.data.length === 0) {
+        setStatusMessage({
+          type: 'info',
+          text: 'Tidak ada soal ditemukan di Supabase sesuai filter yang dipilih.',
+        });
+        showAlert('Tidak ada butir soal ditemukan di Supabase sesuai filter.');
+        return;
+      }
+
+      onRestoreQuestions(result.data, restoreMode);
+      setStatusMessage({
+        type: 'success',
+        text: `Sukses! ${result.data.length} butir soal berhasil dimuat dari Supabase (${
+          restoreMode === 'merge' ? 'Digabungkan' : 'Digantikan'
+        }).`,
+      });
+      showAlert(
+        `Sukses! ${result.data.length} butir soal dari Supabase berhasil disinkronkan ke browser Anda.`
+      );
+    } else {
+      setStatusMessage({ type: 'error', text: result.message });
+    }
+  };
+
+  // --- USER SYNC HANDLERS ---
+  const handleBackupUsersNow = async () => {
+    setIsLoading(true);
+    setStatusMessage({
+      type: 'info',
+      text: 'Sedang mencadangkan data master user ke Supabase Cloud...',
+    });
 
     const result = await backupAllUsersToSupabase({
       students,
@@ -96,13 +242,18 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
     }
   };
 
-  const handleRestoreNow = async () => {
-    if (!confirm('Apakah Anda yakin ingin menyinkronkan & menimpa data user lokal dari Supabase Cloud?')) {
+  const handleRestoreUsersNow = async () => {
+    if (
+      !confirm('Apakah Anda yakin ingin menyinkronkan & menimpa data user lokal dari Supabase Cloud?')
+    ) {
       return;
     }
 
     setIsLoading(true);
-    setStatusMessage({ type: 'info', text: 'Sedang mengunduh data master user dari Supabase Cloud...' });
+    setStatusMessage({
+      type: 'info',
+      text: 'Sedang mengunduh data master user dari Supabase Cloud...',
+    });
 
     const result = await restoreUsersFromSupabase();
 
@@ -125,8 +276,7 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 backdrop-blur-xs p-3 sm:p-5 overflow-y-auto">
-      <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-150">
-        
+      <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in duration-150">
         {/* MODAL HEADER */}
         <div className="bg-gradient-to-r from-emerald-900 via-slate-900 to-teal-950 px-6 py-4 text-white flex items-center justify-between border-b border-emerald-800 shrink-0">
           <div className="flex items-center gap-3">
@@ -135,10 +285,21 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
             </div>
             <div>
               <h2 className="font-bold text-lg sm:text-xl text-white flex items-center gap-2">
-                Backup Cloud Master Data User (Supabase)
+                Penyimpanan Supabase Cloud CBT
+                {isConfigured ? (
+                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Terhubung
+                  </span>
+                ) : (
+                  <span className="bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                    Belum Dikonfigurasi
+                  </span>
+                )}
               </h2>
               <p className="text-xs text-emerald-200 mt-0.5">
-                Penyimpanan cadangan terpusat untuk Data Siswa, Guru, dan Admin
+                Sinkronisasi Bank Soal & Master User Antar-Browser Laptop Guru
               </p>
             </div>
           </div>
@@ -154,6 +315,17 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
         {/* MODAL TAB SWITCHER */}
         <div className="bg-slate-100 px-6 py-2.5 border-b border-slate-200 flex gap-2 shrink-0 overflow-x-auto text-xs font-bold">
           <button
+            onClick={() => setActiveTab('questions')}
+            className={`px-4 py-2 rounded-xl transition flex items-center gap-2 cursor-pointer ${
+              activeTab === 'questions'
+                ? 'bg-emerald-600 text-white shadow-xs'
+                : 'text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" /> Bank Soal Cloud ({questions.length})
+          </button>
+
+          <button
             onClick={() => setActiveTab('sync')}
             className={`px-4 py-2 rounded-xl transition flex items-center gap-2 cursor-pointer ${
               activeTab === 'sync'
@@ -161,7 +333,7 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                 : 'text-slate-600 hover:bg-slate-200'
             }`}
           >
-            <CloudUpload className="w-4 h-4" /> Backup & Restore
+            <Users className="w-4 h-4" /> Master User ({students.length + teachers.length})
           </button>
 
           <button
@@ -172,7 +344,7 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                 : 'text-slate-600 hover:bg-slate-200'
             }`}
           >
-            <Key className="w-4 h-4" /> Pengaturan Kredensial
+            <Key className="w-4 h-4" /> Kredensial API
           </button>
 
           <button
@@ -183,13 +355,12 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                 : 'text-slate-600 hover:bg-slate-200'
             }`}
           >
-            <FileCode className="w-4 h-4" /> Skema SQL Supabase
+            <FileCode className="w-4 h-4" /> Skema SQL Editor
           </button>
         </div>
 
         {/* MODAL BODY */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
-
           {/* STATUS BANNER */}
           {statusMessage && (
             <div
@@ -206,10 +377,193 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
             </div>
           )}
 
-          {/* TAB 1: BACKUP & RESTORE */}
+          {/* TAB 1: BANK SOAL CLOUD */}
+          {activeTab === 'questions' && (
+            <div className="space-y-6">
+              {/* Info Box */}
+              <div className="bg-sky-50 p-4 rounded-2xl border border-sky-200 text-sky-950 text-xs space-y-1.5">
+                <p className="font-bold flex items-center gap-2 text-sky-900">
+                  <Sparkles className="w-4 h-4 text-sky-600" /> Sinkronisasi Bank Soal Antar-Browser Guru
+                </p>
+                <p className="text-sky-800 leading-relaxed">
+                  Dengan Supabase, bank soal tidak lagi terkurung di satu browser laptop saja. Guru
+                  dapat mencadangkan soal ke database Supabase, lalu guru lain atau laptop lain dapat
+                  menarik soal tersebut secara instan!
+                </p>
+              </div>
+
+              {/* CURRENT QUESTIONS SUMMARY */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                    <BookOpen className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-slate-500 font-bold block">
+                      Bank Soal di Browser Ini
+                    </span>
+                    <strong className="text-xl text-slate-900 font-black">
+                      {questions.length} Butir Soal
+                    </strong>
+                    <span className="text-[10px] text-slate-400 block">
+                      Mapel: {defaultMapel} | Guru: {defaultKodeGuru}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                    <Database className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] text-slate-500 font-bold block">
+                      Bank Soal di Supabase Cloud
+                    </span>
+                    <strong className="text-xl text-slate-900 font-black">
+                      {cloudStats ? `${cloudStats.total} Butir Soal` : 'Terhubung'}
+                    </strong>
+                    <span className="text-[10px] text-emerald-700 font-medium block">
+                      {cloudStats
+                        ? `${cloudStats.teachers.length} Guru | ${cloudStats.subjects.length} Mapel`
+                        : 'Siap Sinkron'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* ACTION PANELS */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* 1. UPLOAD TO SUPABASE */}
+                <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-5 rounded-2xl border border-emerald-200 flex flex-col justify-between space-y-4">
+                  <div>
+                    <h4 className="font-extrabold text-emerald-950 text-sm flex items-center gap-2">
+                      <CloudUpload className="w-5 h-5 text-emerald-600" />
+                      <span>Cadangkan Soal Lokal ke Supabase</span>
+                    </h4>
+                    <p className="text-xs text-emerald-800 mt-1 leading-relaxed">
+                      Kirim <b>{questions.length} soal</b> yang ada di browser Anda ke tabel{' '}
+                      <code className="bg-emerald-100 px-1 py-0.5 rounded text-emerald-900 font-mono">
+                        bank_soal
+                      </code>{' '}
+                      di Supabase agar tersimpan aman di cloud.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleBackupQuestionsNow}
+                    disabled={isLoading || !isConfigured || questions.length === 0}
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-black py-3 px-4 rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer active:scale-95"
+                  >
+                    {isLoading ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CloudUpload className="w-4 h-4" />
+                    )}
+                    <span>Upload {questions.length} Soal ke Supabase</span>
+                  </button>
+                </div>
+
+                {/* 2. PULL FROM SUPABASE */}
+                <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-5 rounded-2xl border border-blue-200 flex flex-col justify-between space-y-4">
+                  <div className="space-y-3">
+                    <div>
+                      <h4 className="font-extrabold text-blue-950 text-sm flex items-center gap-2">
+                        <CloudDownload className="w-5 h-5 text-blue-600" />
+                        <span>Tarik Soal dari Supabase Cloud</span>
+                      </h4>
+                      <p className="text-xs text-blue-800 mt-1 leading-relaxed">
+                        Unduh bank soal dari Supabase Cloud ke browser Anda untuk digunakan dalam ujian CBT.
+                      </p>
+                    </div>
+
+                    {/* Filter Options */}
+                    <div className="space-y-2 bg-white/70 p-3 rounded-xl border border-blue-100 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold text-slate-700">Filter Guru:</label>
+                        <select
+                          value={questionFilterGuru}
+                          onChange={(e) => setQuestionFilterGuru(e.target.value)}
+                          className="bg-white border border-slate-300 rounded-lg p-1 text-xs font-semibold"
+                        >
+                          <option value="ALL">Semua Guru (Bank Soal Sekolah)</option>
+                          <option value={defaultKodeGuru}>Hanya Guru Ini ({defaultKodeGuru})</option>
+                          {teachers.map((t) => (
+                            <option key={t.id} value={t.kodeGuru || t.nip}>
+                              {t.nama} ({t.kodeGuru})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold text-slate-700">Filter Mapel:</label>
+                        <select
+                          value={questionFilterMapel}
+                          onChange={(e) => setQuestionFilterMapel(e.target.value)}
+                          className="bg-white border border-slate-300 rounded-lg p-1 text-xs font-semibold"
+                        >
+                          <option value="ALL">Semua Mata Pelajaran</option>
+                          {defaultMapel && (
+                            <option value={defaultMapel}>Hanya Mapel Ini ({defaultMapel})</option>
+                          )}
+                          {(mapelList || []).filter((m) => m !== defaultMapel).map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-bold text-slate-700">Mode Sinkron:</label>
+                        <div className="flex gap-2">
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="restoreMode"
+                              checked={restoreMode === 'merge'}
+                              onChange={() => setRestoreMode('merge')}
+                              className="text-blue-600"
+                            />
+                            <span className="text-[11px] font-bold text-slate-700">Gabungkan</span>
+                          </label>
+                          <label className="flex items-center gap-1 cursor-pointer">
+                            <input
+                              type="radio"
+                              name="restoreMode"
+                              checked={restoreMode === 'replace'}
+                              onChange={() => setRestoreMode('replace')}
+                              className="text-red-600"
+                            />
+                            <span className="text-[11px] font-bold text-red-700">Gantikan</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRestoreQuestionsNow}
+                    disabled={isLoading || !isConfigured}
+                    className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-black py-3 px-4 rounded-xl text-xs shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer active:scale-95"
+                  >
+                    {isLoading ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <CloudDownload className="w-4 h-4" />
+                    )}
+                    <span>Tarik Soal dari Supabase ke Browser</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: MASTER USER SYNC */}
           {activeTab === 'sync' && (
             <div className="space-y-6">
-              
               {/* CURRENT LOCAL DATA SUMMARY */}
               <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200">
                 <h3 className="text-xs font-bold uppercase text-slate-500 mb-3 tracking-wider">
@@ -221,8 +575,12 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                       <Users className="w-5 h-5" />
                     </div>
                     <div>
-                      <span className="text-[11px] text-slate-500 font-bold block">Siswa Terdaftar</span>
-                      <strong className="text-lg text-slate-900 font-black">{students.length} Siswa</strong>
+                      <span className="text-[11px] text-slate-500 font-bold block">
+                        Siswa Terdaftar
+                      </span>
+                      <strong className="text-lg text-slate-900 font-black">
+                        {students.length} Siswa
+                      </strong>
                     </div>
                   </div>
 
@@ -232,7 +590,9 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                     </div>
                     <div>
                       <span className="text-[11px] text-slate-500 font-bold block">Guru Terdaftar</span>
-                      <strong className="text-lg text-slate-900 font-black">{teachers.length} Guru</strong>
+                      <strong className="text-lg text-slate-900 font-black">
+                        {teachers.length} Guru
+                      </strong>
                     </div>
                   </div>
 
@@ -241,8 +601,12 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                       <Shield className="w-5 h-5" />
                     </div>
                     <div>
-                      <span className="text-[11px] text-slate-500 font-bold block">Admin Terdaftar</span>
-                      <strong className="text-lg text-slate-900 font-black">{admins.length} Admin</strong>
+                      <span className="text-[11px] text-slate-500 font-bold block">
+                        Admin Terdaftar
+                      </span>
+                      <strong className="text-lg text-slate-900 font-black">
+                        {admins.length} Admin
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -250,7 +614,6 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
 
               {/* ACTION BUTTONS */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                
                 {/* PUSH BACKUP BUTTON */}
                 <div className="bg-gradient-to-br from-emerald-50 to-teal-50 p-5 rounded-2xl border border-emerald-200 flex flex-col justify-between">
                   <div>
@@ -258,159 +621,120 @@ export const SupabaseBackupModal: React.FC<SupabaseBackupModalProps> = ({
                       <CloudUpload className="w-5 h-5 text-emerald-600" /> Upload / Backup ke Supabase
                     </h4>
                     <p className="text-xs text-emerald-800 mt-1 leading-relaxed">
-                      Kirim dan simpan salinan seluruh data siswa, guru, dan admin dari aplikasi ini ke Supabase Cloud.
+                      Kirim dan perbarui data master user lokal ke database cloud Supabase.
                     </p>
                   </div>
                   <button
-                    onClick={handleBackupNow}
+                    onClick={handleBackupUsersNow}
                     disabled={isLoading || !isConfigured}
-                    className="mt-4 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-bold text-xs shadow-md transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                    className="w-full mt-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                   >
                     {isLoading ? (
                       <RefreshCw className="w-4 h-4 animate-spin" />
                     ) : (
                       <CloudUpload className="w-4 h-4" />
                     )}
-                    <span>Backup Cloud Sekarang</span>
+                    <span>Cadangkan Master User Sekarang</span>
                   </button>
                 </div>
 
                 {/* PULL RESTORE BUTTON */}
-                <div className="bg-gradient-to-br from-sky-50 to-indigo-50 p-5 rounded-2xl border border-sky-200 flex flex-col justify-between">
+                <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-5 rounded-2xl border border-blue-200 flex flex-col justify-between">
                   <div>
-                    <h4 className="font-bold text-sky-950 text-sm flex items-center gap-2">
-                      <CloudDownload className="w-5 h-5 text-sky-600" /> Restore / Sync dari Supabase
+                    <h4 className="font-bold text-blue-950 text-sm flex items-center gap-2">
+                      <CloudDownload className="w-5 h-5 text-blue-600" /> Tarik / Sinkronkan dari
+                      Supabase
                     </h4>
-                    <p className="text-xs text-sky-800 mt-1 leading-relaxed">
-                      Unduh dan muat ulang data master user dari Supabase Cloud jika Anda berpindah perangkat/browser.
+                    <p className="text-xs text-blue-800 mt-1 leading-relaxed">
+                      Unduh data master user dari Supabase Cloud untuk menimpa data master lokal.
                     </p>
                   </div>
                   <button
-                    onClick={handleRestoreNow}
+                    onClick={handleRestoreUsersNow}
                     disabled={isLoading || !isConfigured}
-                    className="mt-4 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-bold text-xs shadow-md transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                    className="w-full mt-4 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs shadow-md transition flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
                   >
                     {isLoading ? (
                       <RefreshCw className="w-4 h-4 animate-spin" />
                     ) : (
                       <CloudDownload className="w-4 h-4" />
                     )}
-                    <span>Restore Data User</span>
+                    <span>Tarik Data Master User</span>
                   </button>
                 </div>
-
               </div>
-
-              {/* ARCHITECTURE NOTICE */}
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-900 leading-relaxed flex items-start gap-3">
-                <ShieldCheck className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
-                <div>
-                  <strong className="font-bold block text-amber-950">Catatan Arsitektur Ujian Offline:</strong>
-                  Pencadangan ini bersifat <b>Master Data User</b>. Saat ujian berlangsung, HP/Laptop siswa bekerja <b>100% offline</b> tanpa terhubung ke Supabase. Siswa mengunduh berkas jawaban <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-950">.cbt</code> setelah selesai dan mengunggahnya ke Google Drive Sekolah.
-                </div>
-              </div>
-
             </div>
           )}
 
-          {/* TAB 2: CONFIGURATION */}
+          {/* TAB 3: PENGATURAN KREDENSIAL */}
           {activeTab === 'config' && (
-            <div className="space-y-5">
+            <div className="space-y-6">
               <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-4">
-                <h3 className="text-xs font-bold uppercase text-slate-700 flex items-center gap-2 border-b border-slate-200 pb-2">
-                  <Key className="w-4 h-4 text-emerald-600" /> Form Kredensial Supabase Project
-                </h3>
-
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Supabase Project URL (<code className="text-emerald-700">VITE_SUPABASE_URL</code>)
+                  <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                    Supabase Project URL
                   </label>
                   <input
                     type="text"
                     value={supabaseUrl}
                     onChange={(e) => setSupabaseUrl(e.target.value)}
                     placeholder="https://your-project-id.supabase.co"
-                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-mono font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    className="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                   />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Ditemukan di Dashboard Supabase &gt; Project Settings &gt; API &gt; Project URL
+                  </p>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Supabase Anon API Key (<code className="text-emerald-700">VITE_SUPABASE_ANON_KEY</code>)
+                  <label className="block text-xs font-bold uppercase text-slate-700 mb-1">
+                    Supabase Anon Public Key (API Key)
                   </label>
                   <textarea
                     rows={3}
                     value={supabaseAnonKey}
                     onChange={(e) => setSupabaseAnonKey(e.target.value)}
                     placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                    className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-800 focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                    className="w-full bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-xs text-slate-900 font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                   />
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Kunci publik &apos;anon public&apos; aman digunakan di aplikasi web client-side.
+                  </p>
                 </div>
 
-                <div className="pt-2">
-                  <button
-                    onClick={handleSaveConfig}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-xl font-bold text-xs shadow-md transition flex items-center gap-2 cursor-pointer active:scale-95"
-                  >
-                    <Check className="w-4 h-4" /> Simpan Kredensial Lokal
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 3: SQL SCHEMA */}
-          {activeTab === 'sql' && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-700 flex items-center gap-2">
-                  <FileCode className="w-4 h-4 text-emerald-600" /> SQL DDL Script (Dashboard Supabase)
-                </span>
                 <button
-                  onClick={handleCopySql}
-                  className="bg-slate-800 hover:bg-slate-900 text-white px-3.5 py-1.5 rounded-xl font-bold text-xs transition flex items-center gap-1.5 cursor-pointer active:scale-95"
+                  type="button"
+                  onClick={handleSaveConfig}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-6 rounded-xl text-xs shadow-md transition flex items-center gap-2 cursor-pointer"
                 >
-                  {copiedSql ? (
-                    <>
-                      <Check className="w-3.5 h-3.5 text-emerald-400" /> Copied!
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3.5 h-3.5" /> Copy SQL
-                    </>
-                  )}
+                  <Check className="w-4 h-4" />
+                  <span>Simpan Kredensial Supabase</span>
                 </button>
               </div>
-
-              <div className="bg-slate-950 text-emerald-400 p-4 rounded-2xl font-mono text-xs overflow-x-auto max-h-[350px] border border-slate-800 leading-relaxed">
-                <pre>{generateSupabaseSQLSchema()}</pre>
-              </div>
             </div>
           )}
 
+          {/* TAB 4: SKEMA SQL EDITOR */}
+          {activeTab === 'sql' && (
+            <div className="space-y-4">
+              <div className="bg-slate-900 text-slate-200 p-4 rounded-xl text-xs space-y-2 font-mono">
+                <div className="flex items-center justify-between text-slate-400 pb-2 border-b border-slate-800">
+                  <span>Skrip SQL Schema Supabase (Termasuk Tabel bank_soal)</span>
+                  <button
+                    onClick={handleCopySql}
+                    className="flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 font-bold bg-slate-800 px-3 py-1 rounded-lg transition cursor-pointer"
+                  >
+                    {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedSql ? 'Disalin!' : 'Salin Semua SQL'}</span>
+                  </button>
+                </div>
+                <pre className="overflow-x-auto text-[11px] leading-relaxed p-2 max-h-80">
+                  {generateSupabaseSQLSchema()}
+                </pre>
+              </div>
+            </div>
+          )}
         </div>
-
-        {/* MODAL FOOTER */}
-        <div className="bg-slate-100 px-6 py-4 border-t border-slate-200 flex items-center justify-between shrink-0">
-          <div className="text-xs text-slate-600 flex items-center gap-2">
-            <span
-              className={`w-2.5 h-2.5 rounded-full ${
-                isConfigured ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'
-              }`}
-            />
-            <span>
-              Status Supabase: <b>{isConfigured ? 'Terkoneksi' : 'Belum Dikonfigurasi'}</b>
-            </span>
-          </div>
-
-          <button
-            onClick={onClose}
-            className="px-5 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl font-bold text-xs transition cursor-pointer"
-          >
-            Tutup
-          </button>
-        </div>
-
       </div>
     </div>
   );

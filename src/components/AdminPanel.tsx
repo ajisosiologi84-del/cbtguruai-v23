@@ -113,7 +113,11 @@ import {
   ChevronUp,
   LayoutGrid,
   Wrench,
+  CloudUpload,
+  CloudDownload,
 } from 'lucide-react';
+import { isSupabaseConfigured } from '../lib/supabase';
+import { backupQuestionsToSupabase } from '../services/supabaseBackup';
 
 interface AdminPanelProps {
   config: AppConfig;
@@ -170,6 +174,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isExamCardPrintModalOpen, setIsExamCardPrintModalOpen] = useState(false);
   const [isAttendancePrintModalOpen, setIsAttendancePrintModalOpen] = useState(false);
   const [isSupabaseBackupModalOpen, setIsSupabaseBackupModalOpen] = useState(false);
+  const [supabaseModalInitialTab, setSupabaseModalInitialTab] = useState<'questions' | 'sync' | 'config' | 'sql'>('questions');
+  const [isQuickBackingUpToSupabase, setIsQuickBackingUpToSupabase] = useState(false);
+
+  const openSupabaseModal = (tab: 'questions' | 'sync' | 'config' | 'sql' = 'questions') => {
+    setSupabaseModalInitialTab(tab);
+    setIsSupabaseBackupModalOpen(true);
+  };
 
   // Download Animation Modal State
   const [isDownloadModalOpen, setIsDownloadModalOpen] = useState(false);
@@ -1529,6 +1540,28 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       },
       true
     );
+  };
+
+  const handleQuickBackupQuestionsToSupabase = async () => {
+    if (!isSupabaseConfigured()) {
+      openSupabaseModal('config');
+      return;
+    }
+    if (!config.questions || config.questions.length === 0) {
+      showAlert('Tidak ada butir soal di Bank Soal untuk dicadangkan ke Supabase.');
+      return;
+    }
+    const currentKg = loggedInTeacher?.kodeGuru || (selectedGuruFilter !== 'ALL' ? selectedGuruFilter : (config.kodeGuru || 'GURU01'));
+    const currentMapel = mapelInput || config.mapel || 'Sosiologi';
+    setIsQuickBackingUpToSupabase(true);
+    try {
+      const result = await backupQuestionsToSupabase(config.questions, currentKg, currentMapel);
+      setIsQuickBackingUpToSupabase(false);
+      showAlert(result.message);
+    } catch (err: any) {
+      setIsQuickBackingUpToSupabase(false);
+      showAlert(`Gagal mencadangkan soal ke Supabase: ${err.message || err}`);
+    }
   };
 
   // 1. Download Template PG Sederhana
@@ -5219,12 +5252,74 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </button>
             </div>
 
+            {/* Supabase Cloud Bank Soal Storage Card */}
+            <div className="bg-gradient-to-br from-emerald-900 via-slate-900 to-teal-950 p-5 rounded-2xl shadow-md border border-emerald-700/80 text-white space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                    <Database className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-xs uppercase tracking-wider text-emerald-200">
+                      Cloud Bank Soal (Supabase)
+                    </h3>
+                    <p className="text-[10px] text-emerald-300/80">Simpan antar-browser laptop guru</p>
+                  </div>
+                </div>
+                {isSupabaseConfigured() ? (
+                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-[9px] font-black px-2 py-0.5 rounded-full flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    Aktif
+                  </span>
+                ) : (
+                  <span className="bg-amber-500/20 text-amber-300 border border-amber-400/40 text-[9px] font-bold px-2 py-0.5 rounded-full">
+                    Setting
+                  </span>
+                )}
+              </div>
+
+              <p className="text-[11px] text-emerald-100/90 leading-relaxed font-medium">
+                Simpan soal ke cloud database Supabase agar tidak hilang saat ganti laptop/browser, dan dapat disinkronkan antar guru.
+              </p>
+
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={handleQuickBackupQuestionsToSupabase}
+                  disabled={isQuickBackingUpToSupabase}
+                  className="bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-[11px] py-2 px-2 rounded-xl transition shadow-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="Upload seluruh soal browser ke database cloud Supabase"
+                >
+                  <CloudUpload className="w-3.5 h-3.5" />
+                  <span>{isQuickBackingUpToSupabase ? 'Menyimpan...' : 'Simpan Cloud'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => openSupabaseModal('questions')}
+                  className="bg-teal-700/90 hover:bg-teal-600 active:bg-teal-800 text-white font-bold text-[11px] py-2 px-2 rounded-xl transition border border-teal-500/50 flex items-center justify-center gap-1.5 cursor-pointer"
+                  title="Buka panel tarik soal dan sinkronisasi Supabase"
+                >
+                  <CloudDownload className="w-3.5 h-3.5 text-teal-200" />
+                  <span>Tarik Soal</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => openSupabaseModal('config')}
+                className="w-full text-center text-[10px] text-emerald-300 hover:text-white transition underline cursor-pointer pt-0.5"
+              >
+                ⚙️ Atur Kredensial URL & Key Supabase
+              </button>
+            </div>
+
             <div className="bg-blue-50 p-5 rounded-2xl border border-blue-100 text-sm text-blue-900 space-y-2">
               <p className="font-bold flex items-center gap-2 text-blue-800">
                 <Info className="w-4 h-4 text-blue-600" /> Informasi Penyimpanan Data
               </p>
               <p className="text-xs text-blue-800 leading-relaxed">
-                Semua soal dan konfigurasi disimpan di <b>Local Storage</b> browser Anda. Data tidak akan hilang saat halaman direfresh.
+                Semua soal dan konfigurasi tersimpan di <b>Local Storage</b> browser Anda serta dapat dicadangkan ke <b>Supabase Cloud</b> untuk sinkronisasi antar-perangkat.
               </p>
             </div>
 
@@ -5296,6 +5391,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => openSupabaseModal('questions')}
+                  className="bg-teal-700 hover:bg-teal-800 active:bg-teal-900 text-white px-3.5 py-2.5 rounded-xl font-bold text-xs shadow-sm hover:shadow transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                  title="Simpan & Tarik Bank Soal via Supabase Cloud (Multi-Browser Guru)"
+                >
+                  <Database className="w-4 h-4 text-teal-200" />
+                  <span>Cloud Supabase</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() => setIsBankToolsExpanded(!isBankToolsExpanded)}
                   className={`px-3.5 py-2.5 rounded-xl font-bold text-xs border transition-all flex items-center gap-1.5 cursor-pointer ${
                     isBankToolsExpanded
@@ -5305,7 +5410,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   title="Buka / sembunyikan pusat menu & fitur aplikasi Bank Soal"
                 >
                   <LayoutGrid className="w-4 h-4 text-amber-600" />
-                  <span>Menu Aplikasi (7)</span>
+                  <span>Menu Aplikasi (8)</span>
                   {isBankToolsExpanded ? (
                     <ChevronUp className="w-3.5 h-3.5 text-amber-700" />
                   ) : (
@@ -5348,7 +5453,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                           : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                       }`}
                     >
-                      Semua (7)
+                      Semua (8)
                     </button>
                     <button
                       type="button"
@@ -5360,7 +5465,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       }`}
                     >
                       <FileSpreadsheet className="w-3.5 h-3.5" />
-                      <span>Berkas & Sync (4)</span>
+                      <span>Berkas & Sync (5)</span>
                     </button>
                     <button
                       type="button"
@@ -5561,7 +5666,42 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     </div>
                   )}
 
-                  {/* 7. Hapus Semua Soal */}
+                  {/* 7. Supabase Cloud Bank Soal */}
+                  {(bankToolsCategory === 'all' || bankToolsCategory === 'files') && (
+                    <div className="bg-white p-3.5 rounded-xl border border-slate-200 hover:border-teal-300 hover:shadow-xs transition-all flex flex-col justify-between group">
+                      <div className="flex items-start gap-3 mb-2.5">
+                        <div className="w-9 h-9 rounded-xl bg-teal-100 text-teal-700 flex items-center justify-center shrink-0">
+                          <Database className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="font-extrabold text-xs text-slate-800 group-hover:text-teal-700 transition-colors">
+                            Supabase Cloud Bank Soal
+                          </h4>
+                          <p className="text-[11px] text-slate-500 leading-snug mt-0.5">
+                            Simpan & tarik bank soal antar-browser laptop guru via database cloud PostgreSQL.
+                          </p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5 mt-2">
+                        <button
+                          type="button"
+                          onClick={() => openSupabaseModal('questions')}
+                          className="py-1.5 px-2 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 text-[11px] font-bold text-center transition-colors cursor-pointer"
+                        >
+                          Buka Cloud Soal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openSupabaseModal('config')}
+                          className="py-1.5 px-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold text-center transition-colors cursor-pointer"
+                        >
+                          Setting Kredensial
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 8. Hapus Semua Soal */}
                   {(bankToolsCategory === 'all' || bankToolsCategory === 'maintenance') && (
                     <div className="bg-white p-3.5 rounded-xl border border-rose-200 hover:border-rose-400 hover:shadow-xs transition-all flex flex-col justify-between group">
                       <div className="flex items-start gap-3 mb-2.5">
@@ -6068,7 +6208,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </button>
 
                   <button
-                    onClick={() => setIsSupabaseBackupModalOpen(true)}
+                    onClick={() => openSupabaseModal('sync')}
                     className="bg-emerald-700 hover:bg-emerald-800 text-white px-3.5 py-2.5 rounded-xl font-bold text-xs shadow-md transition-all flex items-center gap-1.5 active:scale-95 cursor-pointer"
                   >
                     <Database className="w-4 h-4 text-emerald-200" /> Backup Supabase (User)
@@ -6933,6 +7073,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-5 py-3 rounded-xl text-xs transition-all shadow-md shrink-0 flex items-center gap-2 cursor-pointer"
                 >
                   <Edit3 className="w-4 h-4" /> Atur Kop & TTD
+                </button>
+              </div>
+
+              {/* Card 4: Supabase Cloud Database */}
+              <div className="bg-teal-50/70 border border-teal-200 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <h3 className="font-bold text-sm text-teal-950 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-teal-700" /> Sinkronisasi Cloud Supabase (Bank Soal & User)
+                  </h3>
+                  <p className="text-xs text-teal-800 leading-relaxed">
+                    Pencadangan cloud multi-browser guru menggunakan database Supabase (PostgreSQL). Guru dapat mencadangkan bank soal dan mengunduhnya kembali di browser laptop manapun.
+                  </p>
+                </div>
+                <button
+                  onClick={() => openSupabaseModal('questions')}
+                  className="bg-teal-700 hover:bg-teal-800 active:bg-teal-900 text-white font-bold px-5 py-3 rounded-xl text-xs transition-all shadow-md shrink-0 flex items-center gap-2 cursor-pointer"
+                >
+                  <Database className="w-4 h-4 text-teal-200" /> Buka Supabase Cloud
                 </button>
               </div>
 
@@ -10688,13 +10846,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         }}
       />
 
-      {/* MODAL: BACKUP CLOUD MASTER DATA USER (SUPABASE) */}
+      {/* MODAL: BACKUP CLOUD MASTER DATA USER & BANK SOAL (SUPABASE) */}
       <SupabaseBackupModal
         isOpen={isSupabaseBackupModalOpen}
         onClose={() => setIsSupabaseBackupModalOpen(false)}
         students={displayStudentsList}
         teachers={teachersList}
         admins={adminsList}
+        questions={config.questions}
+        defaultKodeGuru={loggedInTeacher?.kodeGuru || (selectedGuruFilter !== 'ALL' ? selectedGuruFilter : (config.kodeGuru || 'GURU01'))}
+        defaultMapel={mapelInput || config.mapel || 'Sosiologi'}
+        mapelList={mapelList}
+        initialTab={supabaseModalInitialTab}
         showAlert={showAlert}
         onRestoreUsers={(data) => {
           if (data.students && data.students.length > 0) {
@@ -10712,6 +10875,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             teachers: data.teachers.length > 0 ? data.teachers : config.teachers,
             admins: data.admins.length > 0 ? data.admins : config.admins,
           });
+        }}
+        onRestoreQuestions={(restoredQuestions, mode) => {
+          let newQuestions: Question[] = [];
+          if (mode === 'replace') {
+            newQuestions = restoredQuestions;
+          } else {
+            const existingMap = new Map<number, Question>();
+            config.questions.forEach((q) => existingMap.set(Number(q.id), q));
+            restoredQuestions.forEach((q) => existingMap.set(Number(q.id), q));
+            newQuestions = Array.from(existingMap.values()).sort((a, b) => Number(a.id) - Number(b.id));
+          }
+          onSaveConfig({ ...config, questions: newQuestions });
+          showAlert(
+            `Sukses! ${restoredQuestions.length} butir soal dari Supabase berhasil disinkronkan ke Bank Soal (${
+              mode === 'merge' ? 'Digabungkan' : 'Digantikan'
+            }). Total sekarang: ${newQuestions.length} butir soal.`
+          );
         }}
       />
 
